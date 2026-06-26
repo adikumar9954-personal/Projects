@@ -19,6 +19,7 @@ ROOT = os.path.dirname(__file__)
 from cg.api import Observation, to_observation_class
 from cg.game import battle_start, battle_select, battle_finish
 from heuristics import score_option
+from dragapult_strategy import adjust_score
 from lookahead import lookahead_main_scores
 from mcts import mcts_search
 from card_tracker import set_deck
@@ -52,6 +53,7 @@ def heuristic_agent(obs: Observation) -> list[int]:
     for i, opt in enumerate(obs.select.option):
         try:
             s = score_option(opt, obs)
+            s = adjust_score(opt, obs, s)
         except Exception:
             s = 0.0
         scored.append((i, s))

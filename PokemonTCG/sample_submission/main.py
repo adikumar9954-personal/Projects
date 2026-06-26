@@ -3,6 +3,7 @@ import random
 
 from cg.api import Observation, to_observation_class
 from heuristics import score_option
+from dragapult_strategy import adjust_score
 
 def read_deck_csv() -> list[int]:
     file_path = "deck.csv"
@@ -27,6 +28,7 @@ def agent(obs_dict: dict) -> list[int]:
     for i, opt in enumerate(options):
         try:
             s = score_option(opt, obs)
+            s = adjust_score(opt, obs, s)
         except Exception:
             s = 0.0
         scored.append((i, s))
