@@ -24,7 +24,9 @@ def score_option(option: Option, obs: Observation) -> float:
         return _score_main(option, state, your, opp)
     elif ctx == SelectContext.ATTACK:
         return _score_attack(option, your, opp)
-    elif ctx in (SelectContext.SETUP_ACTIVE_POKEMON, SelectContext.TO_ACTIVE, SelectContext.SWITCH):
+    elif ctx == SelectContext.SWITCH:
+        return _score_switch(option, state)
+    elif ctx in (SelectContext.SETUP_ACTIVE_POKEMON, SelectContext.TO_ACTIVE):
         return _score_to_active(option, your, state)
     elif ctx in (SelectContext.SETUP_BENCH_POKEMON, SelectContext.TO_BENCH, SelectContext.TO_FIELD):
         return _score_to_bench(option, your, state)
@@ -60,16 +62,16 @@ def _score_main(option: Option, state: State, your: PlayerState, opp: PlayerStat
     otype = option.type
 
     if otype == OptionType.EVOLVE:
-        return 900.0
+        return _score_main_evolve(option, state, your)
 
     if otype == OptionType.ATTACH:
         return _score_main_attach(option, state, your)
 
     if otype == OptionType.PLAY:
-        return _score_main_play(option, your)
+        return _score_main_play(option, your, state)
 
     if otype == OptionType.ABILITY:
-        return 600.0
+        return 650.0
 
     if otype == OptionType.ATTACK:
         return _score_main_attack(option, your, opp)
@@ -81,28 +83,45 @@ def _score_main(option: Option, state: State, your: PlayerState, opp: PlayerStat
         return 50.0
 
     if otype == OptionType.END:
-        return -1.0
+        return _score_main_end(your, opp, state)
 
     return 0.0
+
+
+def _score_main_evolve(option: Option, state: State, your: PlayerState) -> float:
+    return 900.0
 
 
 def _score_main_attach(option: Option, state: State, your: PlayerState) -> float:
     if state.energyAttached:
         return 750.0
 
-    active = _get_active(your)
-    if active:
-        card_data = get_card(active.id)
-        if card_data:
-            for atk_id in card_data.attacks:
+    target_poke = None
+    if option.inPlayArea is not None:
+        target_poke = _pokemon_at(your, option.inPlayArea, option.inPlayIndex)
+
+    if target_poke:
+        target_card = get_card(target_poke.id)
+        if target_card:
+            is_attacker = target_card.ex or target_card.stage2 or target_card.stage1
+            is_active = option.inPlayArea == AreaType.ACTIVE
+
+            for atk_id in target_card.attacks:
                 atk = get_attack(atk_id)
-                if atk and len(active.energies) < len(atk.energies):
-                    return 850.0
+                if atk and len(target_poke.energies) < len(atk.energies):
+                    if is_attacker and is_active:
+                        return 880.0
+                    if is_attacker:
+                        return 860.0
+                    return 830.0
 
-    return 800.0
+            if not is_attacker and target_card.basic and target_card.hp <= 70:
+                return 750.0
+
+    return 810.0
 
 
-def _score_main_play(option: Option, your: PlayerState) -> float:
+def _score_main_play(option: Option, your: PlayerState, state: State = None) -> float:
     if option.index is None or your.hand is None:
         return 700.0
     if option.index >= len(your.hand):
@@ -124,6 +143,26 @@ def _score_main_play(option: Option, your: PlayerState) -> float:
     return 700.0
 
 
+def _score_main_end(your: PlayerState, opp: PlayerState, state: State) -> float:
+    return -1.0
+
+
+def _estimate_damage_simple(base_damage: int, your: PlayerState, opp: PlayerState) -> int:
+    damage = base_damage
+    your_active = _get_active(your)
+    opp_active = _get_active(opp)
+    if your_active and opp_active:
+        your_card = get_card(your_active.id)
+        opp_card = get_card(opp_active.id)
+        if your_card and opp_card and opp_card.weakness:
+            if your_card.energyType == opp_card.weakness:
+                damage *= 2
+        if your_card and opp_card and opp_card.resistance:
+            if your_card.energyType == opp_card.resistance:
+                damage -= 30
+    return max(damage, 0)
+
+
 def _score_main_attack(option: Option, your: PlayerState, opp: PlayerState) -> float:
     atk = get_attack(option.attackId)
     if atk is None:
@@ -136,7 +175,9 @@ def _score_main_attack(option: Option, your: PlayerState, opp: PlayerState) -> f
     damage = _estimate_damage(atk, your, opp)
 
     if damage >= opp_active.hp:
-        return 1000.0
+        opp_card = get_card(opp_active.id)
+        ko_bonus = 200.0 if opp_card and opp_card.ex else 0.0
+        return 1000.0 + damage + ko_bonus
 
     return 400.0 + damage
 
@@ -153,27 +194,68 @@ def _score_main_retreat(your: PlayerState, opp: PlayerState) -> float:
 
     card_data = get_card(active.id)
     can_attack = False
+    best_damage = 0
     if card_data:
         for atk_id in card_data.attacks:
             atk = get_attack(atk_id)
             if atk and len(active.energies) >= len(atk.energies):
                 can_attack = True
-                break
+                best_damage = max(best_damage, atk.damage)
+
+    bench_ready = None
+    for p in your.bench:
+        if p is None:
+            continue
+        pcd = get_card(p.id)
+        if pcd:
+            for atk_id in pcd.attacks:
+                atk = get_attack(atk_id)
+                if atk and len(p.energies) >= len(atk.energies):
+                    if bench_ready is None or atk.damage > best_damage:
+                        bench_ready = p
+                    break
 
     if hp_ratio <= 0.2 and len(your.bench) > 0:
         return 500.0
     if hp_ratio <= 0.4 and not can_attack:
         return 300.0
-    if not can_attack and len(your.bench) > 0:
-        best_bench = max(
-            (p for p in your.bench if p is not None),
-            key=lambda p: len(p.energies),
-            default=None,
-        )
-        if best_bench and len(best_bench.energies) > len(active.energies):
-            return 250.0
+    if not can_attack and bench_ready:
+        return 250.0
 
     return -10.0
+
+
+def _score_switch(option: Option, state: State) -> float:
+    """Score a SWITCH target. Context determines if we're pulling an opponent's
+    Pokemon (Boss's Orders) or choosing which of our own to send up."""
+    your = state.players[state.yourIndex]
+    opp = state.players[1 - state.yourIndex]
+
+    if option.playerIndex is not None and option.playerIndex != state.yourIndex:
+        poke = _pokemon_at(opp, option.area, option.index)
+        if poke is None:
+            return 0.0
+        card_data = get_card(poke.id)
+        score = 0.0
+        if poke.hp <= 100:
+            score += 500.0
+        score += (1000.0 - poke.hp)
+        has_energy = len(poke.energies) > 0
+        if has_energy:
+            score += 200.0
+        if card_data and card_data.ex:
+            score += 300.0
+        if card_data and (card_data.stage2 or card_data.stage1):
+            score += 100.0
+        our_active = _get_active(your)
+        if our_active and card_data:
+            our_card = get_card(our_active.id)
+            if our_card and card_data.weakness and our_card.energyType == card_data.weakness:
+                score += 400.0
+        return score
+
+    poke = _pokemon_at(your, option.area, option.index)
+    return _score_to_active(option, your, state)
 
 
 # ---------------------------------------------------------------------------
@@ -291,14 +373,45 @@ def _score_discard(option: Option, state: State) -> float:
     if card_data is None:
         return 50.0
 
+    your = state.players[state.yourIndex]
+
     if card_data.cardType in (CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
-        return 80.0
+        hand_energy = 0
+        if your.hand:
+            for c in your.hand:
+                cd = get_card(c.id)
+                if cd and cd.cardType in (CardType.BASIC_ENERGY, CardType.SPECIAL_ENERGY):
+                    hand_energy += 1
+        if hand_energy > 2 or state.energyAttached:
+            return 90.0
+        return 70.0
+
     if card_data.cardType == CardType.ITEM:
+        return 65.0
+
+    if card_data.cardType == CardType.STADIUM:
         return 60.0
+
+    if card_data.cardType == CardType.TOOL:
+        return 55.0
+
     if card_data.cardType == CardType.SUPPORTER:
-        return 40.0
+        if card_data.name and "Boss" in card_data.name:
+            return 5.0
+        if card_data.name and "Lillie" in card_data.name:
+            return 10.0
+        return 30.0
+
     if card_data.cardType == CardType.POKEMON:
-        return 20.0
+        if card_data.ex:
+            return 5.0
+        if card_data.stage2 or card_data.stage1:
+            in_play = _get_in_play_names(your)
+            if card_data.evolvesFrom and card_data.evolvesFrom in in_play:
+                return 5.0
+            return 25.0
+        return 40.0
+
     return 50.0
 
 
@@ -417,7 +530,11 @@ def _score_attach_to(option: Option, your: PlayerState, state: State = None) -> 
 
     area = option.inPlayArea if option.inPlayArea is not None else option.area
     is_active = area == AreaType.ACTIVE
+    is_attacker = card_data.ex or card_data.stage2 or card_data.stage1
     score = 0.0
+
+    if not is_attacker and card_data.basic and card_data.hp <= 70:
+        return 10.0
 
     best_atk_score = 0.0
     for atk_id in card_data.attacks:
@@ -448,11 +565,11 @@ def _score_attach_to(option: Option, your: PlayerState, state: State = None) -> 
 
     if is_active:
         score += 150.0
-
-    if poke.hp > poke.maxHp * 0.5:
-        score += 50.0
-
+    if is_attacker:
+        score += 100.0
     if card_data.ex:
+        score += 50.0
+    if poke.hp > poke.maxHp * 0.5:
         score += 30.0
 
     return score

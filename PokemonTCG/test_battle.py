@@ -19,11 +19,24 @@ ROOT = os.path.dirname(__file__)
 from cg.api import Observation, to_observation_class
 from cg.game import battle_start, battle_select, battle_finish
 from heuristics import score_option
+from lookahead import lookahead_main_scores
+from mcts import mcts_search
+from card_tracker import set_deck
+from cg.api import SelectContext
 
 
 def read_deck() -> list[int]:
     with open(os.path.join(ROOT, "sample_submission", "deck.csv")) as f:
         return [int(line.strip()) for line in f if line.strip()]
+
+
+_deck_initialized = False
+
+def _ensure_deck():
+    global _deck_initialized
+    if not _deck_initialized:
+        set_deck(read_deck())
+        _deck_initialized = True
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +59,45 @@ def heuristic_agent(obs: Observation) -> list[int]:
     return [i for i, _ in scored[:obs.select.maxCount]]
 
 
+def lookahead_agent(obs: Observation) -> list[int]:
+    _ensure_deck()
+    scored = None
+    if obs.select.context == SelectContext.MAIN:
+        scored = lookahead_main_scores(obs)
+    if scored is None:
+        scored = []
+        for i, opt in enumerate(obs.select.option):
+            try:
+                s = score_option(opt, obs)
+            except Exception:
+                s = 0.0
+            scored.append((i, s))
+    scored.sort(key=lambda x: (-x[1], random.random()))
+    return [i for i, _ in scored[:obs.select.maxCount]]
+
+
+def mcts_agent(obs: Observation) -> list[int]:
+    _ensure_deck()
+    scored = None
+    if obs.select.context == SelectContext.MAIN:
+        scored = mcts_search(obs)
+    if scored is None:
+        scored = []
+        for i, opt in enumerate(obs.select.option):
+            try:
+                s = score_option(opt, obs)
+            except Exception:
+                s = 0.0
+            scored.append((i, s))
+    scored.sort(key=lambda x: (-x[1], random.random()))
+    return [i for i, _ in scored[:obs.select.maxCount]]
+
+
 AGENTS = {
     "random": random_agent,
     "heuristic": heuristic_agent,
+    "lookahead": lookahead_agent,
+    "mcts": mcts_agent,
 }
 
 
